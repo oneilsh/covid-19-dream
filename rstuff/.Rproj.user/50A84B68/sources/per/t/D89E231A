@@ -1,0 +1,26 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1589837959304.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "4150876006",
+    "id" : "D89E231A",
+    "lastKnownWriteTime" : 1589990858,
+    "last_content_update" : 1589990858574,
+    "path" : "~/Documents/projects/ontologies/covid-challenge/covid-19-dream/rstuff/subset_and_clean.R",
+    "project_path" : "subset_and_clean.R",
+    "properties" : {
+        "cursorPosition" : "10,0",
+        "scrollLine" : "3",
+        "tempName" : "Untitled1"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 1,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}
