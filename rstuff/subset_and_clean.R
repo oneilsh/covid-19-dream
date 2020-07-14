@@ -84,15 +84,39 @@ data_named_location <- lapply(data_named,
                                 return(df)
                               })
 
+# Tom's correction: get rid of pointless cols
+data <- lapply(data_named_location,
+               function(df) {
+                 pointless <- unlist(lapply(df, function(col) { 
+                                           return(length(unique(col)) == 1)
+                                         }))
+                 return(df[, !pointless])
+               })
+
+# convert date & time strings into proper date types
+library(lubridate)
+data <- lapply(data,
+               function(df) {
+                 for(colname in colnames(df)) {
+                   if(grepl("^.+_((datetime)|(date)|(time))$", colname)) {
+                     cat("converting: ", colname, "\n")
+                     df[[colname]] <- as_datetime(df[[colname]])
+                   } else {
+                     cat("not converting: ", colname, "\n")
+                   }
+                 }
+                 return(df)
+               })
+
 # write it out and start a new script...
-save(data_named_location, file = output_rdat)
+save(data, file = output_rdat)
 
 
 # may as well write .tsvs too
-for(tablename in names(data_named_location)) {
-  table <- data_named_location[[tablename]]
+for(tablename in names(data)) {
+  table <- data[[tablename]]
   write.table(table, 
-              file = paste0(data_path, "w_concepts_", tablename), 
+              file = paste0(data_path, tablename, ".w_concepts"), 
               sep = "\t", 
               row.names = FALSE,
               quote = FALSE)

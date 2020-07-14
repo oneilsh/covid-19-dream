@@ -1,0 +1,431 @@
+---
+title: "Random Forest (first pass)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Loading data:
+
+```{r}
+load("../../subset_data.Rdat")
+```
+
+
+There's a new R package out, `tidymodels`. Not sure how I feel about it yet, but it's nice that it provides a common interface to a bunch of other ML and stats models rather than having to remember the particulars of each. May as well give it an honest try. Actually, I'm going to go full tidy just to see how it goes...
+
+## Test Set
+
+Before doing anything, pull out a subset of data to traing models on (and validate them as we try out different things), and for a final test once we think we've got it figured out. With only 928 positives I don't want to lose too much for building from but I don't want to have a small set for testing either. I'll go with every 7th person (~15%), stratified by positive/negative to keep relative class balance. Randomizing `person_id` lists first to avoid picking up any patterns using `rownum %% 7 == 0` as a train/test identifier.
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+set.seed(237)
+
+positive_person_ids <- 
+  data$goldstandard.csv %>% 
+  filter(status == 1) %>%
+  pull(person_id) %>%
+  # sample with no other params shuffles
+  sample()
+
+
+negative_person_ids <- 
+  data$goldstandard.csv %>% 
+  filter(status == 0) %>%
+  pull(person_id) %>%
+  sample()
+
+positive_train_ids <- positive_person_ids[1:length(positive_person_ids) %% 7 != 0]
+positive_test_ids <- positive_person_ids[1:length(positive_person_ids) %% 7 == 0]
+
+negative_train_ids <- negative_person_ids[1:length(negative_person_ids) %% 7 != 0]
+negative_test_ids <- negative_person_ids[1:length(negative_person_ids) %% 7 == 0]
+
+train_ids <- sample(c(positive_train_ids, negative_train_ids))
+test_ids <- sample(c(positive_test_ids, negative_test_ids))
+
+
+train_data <- lapply(data, function(df) {
+  return(df %>% filter(person_id %in% train_ids))
+})
+
+test_data <- lapply(data, function(df) {
+  return(df %>% filter(person_id %in% test_ids))
+})
+
+# let's just call train_data data and forget about it
+data <- train_data
+```
+
+
+## Feature Engineering
+
+For a basic random forest we'll need a table with predictor columns and outcome column to predict. Lacking any good idea of how to predict test results from this data, looking at most recent measurements and how long it's been since. 
+
+
+
+```{r}
+library(lubridate)
+
+latest_measurements <- 
+  data$measurement.csv %>%
+  mutate(year = year(measurement_date)) %>% 
+  #head(n = 2000) %>%
+  group_by(person_id, measurement_concept_id) %>%
+  # most recent entry per group
+  summarize(latest_value = value_as_number[which.max(measurement_datetime)],
+            days_since = now() - max(measurement_datetime)) %>% 
+  gather(variable, value, -measurement_concept_id, -person_id) %>%
+  unite(temp, measurement_concept_id, variable) %>%
+  spread(temp, value) 
+
+View(latest_measurements)
+
+```
+
+We can't have NA values, so I'll impute those as the middle of the normal range. So I need a list of normal ranges, despite that the `range_high` and `range_low` aren't consistent (e.g. occasionally 0.0, coding error?). Using medians of these as representative. 
+
+```{r}
+ranges <- data$measurement.csv %>%
+  group_by(measurement_concept_id) %>%
+  summarize(range_low = median(range_low),
+            range_high = median(range_high))
+```
+
+Now to impute unknown values in the data as from these normal ranges. One option might be to randomly sample from the normal ranges, but I'm not sure that's any better than just using the middle of the range, so... Let's also change any `days_since` values to be 1, with the idea being that's our guess as of now. (Mabye this isn't a good idea, if the model learns to weight recent values more, as it probably should, then it will be relying more heavily on these imputations as well, and/or we're reducing the reliability of recent measurements.)
+
+
+```{r}
+for(i in 1:nrow(ranges)) {
+  measurement_id <- ranges$measurement_concept_id[i]
+  range_low <- ranges$range_low[i]
+  range_high <- ranges$range_high[i]
+  middle <- mean(c(range_low, range_high))
+  
+  colname <- paste0(measurement_id, "_latest_value")
+  latest_measurements[[colname]][is.na(latest_measurements[[colname]])] <- middle
+}
+
+latest_measurements[is.na(latest_measurements)] <- 1
+View(latest_measurements)
+```
+
+Let's also track recent conditions, but only for the top 20 or so since there are so many. We'll impute `NA` values here as a large number of days since (haven't had in 100 years ~ never had).
+
+```{r}
+# we'll do the same for conditions, but we'll only check the top 20 conditions
+common_conditions_only <- 
+  data$condition_occurrence.csv %>% 
+  group_by(condition_concept_id) %>% 
+  summarize(n = length(condition_concept_id)) %>% 
+  arrange(desc(n)) %>% 
+  head(n = 20) %>%
+  merge(data$condition_occurrence.csv, by = "condition_concept_id")
+
+latest_conditions <- common_conditions_only %>% 
+  group_by(person_id, condition_concept_id) %>%
+  # need explicit conversion to numeric for imputing NA values as numeric
+  summarize(days_since = as.numeric(now() - max(condition_end_date))) %>% 
+  mutate(condition_concept_id = paste0(condition_concept_id, "_days_since")) %>%
+  spread(condition_concept_id, days_since)
+
+latest_conditions[is.na(latest_conditions)] <- 365*100
+View(latest_conditions)
+
+```
+
+Ok, let's merge these two and the original person and status tables for our final dataset.
+
+```{r}
+# merge can only merge 2 dataframes at a time, so piping to a series of them works surprisingly well
+# shame about needing to specify by = every time
+all <- 
+  data$goldstandard.csv %>% 
+  merge(data$person.csv, by = "person_id") %>%
+  merge(latest_measurements, by = "person_id") %>%
+  merge(latest_conditions, by = "person_id") %>%
+  # these are still numeric but should be factors
+  mutate(status = as.factor(status),
+         zip = as.factor(zip)) 
+
+# apparently ranger (below) doesn't like these column names what with all the spaces and everything
+# downcasing and converting spaces to underscores, other non-alnums to .
+
+library(stringr)
+colnames(all) <- colnames(all) %>% 
+  str_replace_all(" ", "_") %>% 
+  str_replace_all("[^[A-Za-z0-9._]]", ".") %>% 
+  tolower()
+
+View(all)
+```
+
+## Prediction
+
+Ok, `tidymodels` time. Splitting into training and validation (test) sets, stratified by status. 
+
+```{r}
+library(tidymodels)
+
+set.seed(878)
+
+# this apparently just returns a wrapper around the data with data about which row ids are in one side of the split? like a specialized group_by I guess
+train_val_split <- initial_split(all, strata = status, prop = 0.8)
+
+train_data <- training(train_val_split)
+validate_data <- testing(train_val_split)
+```
+
+A tidymodel 'recipe' is a sequence of steps tied to an input dataframe
+can be used for repeatable feature engineering (normalize this and that col, etc)
+not using it for that since did all the engineering above.
+
+But recipes can also assign 'roles' to columns which will be taken into account
+during training, e.g. don't use person_id as a predictor variable. 
+The "predictor" and "outcome" roles are apparently special and used by the modeling process.
+Labeling columns with roles allows to say e.g. "call scale() on every column with role 'needs_scaling'".
+
+Not clear yet whether the recipe should create dummy variables for categorical data - 
+docs say yes in general, but help(rand_forest) says "Note that ranger::ranger() 
+does not require factor predictors to be converted to indicator variables."
+
+*NOTE* - even though this uses the train_data, it only uses it to get the data 'structure' - which
+columns there are, which types those columns are, and what will need to be done to them.
+The recipe can be applied to any data of the same structure.
+
+```{r}
+bake_data <- recipe(status ~ ., data = train_data) %>% # predict status from all other column
+  update_role(person_id, location_id, new_role = "ID") %>%
+  # some of these cols still have NA, let's just drop them as predictors
+  update_role(address_1, 
+              address_2, 
+              city, 
+              state, 
+              zip, 
+              county, 
+              location_source_value, 
+              new_role = "incomplete_data")
+  
+summary(bake_data)
+```
+
+
+We want a random forest model, using the 'ranger' engine, for binary classification.
+
+```{r}
+rf_model <- 
+  rand_forest(trees = 1000) %>% 
+  set_engine("ranger") %>%
+  set_mode("classification")
+```
+
+
+Aaaand then there's the workflow - data + recipe, tempted to skip but lets... It doesn't show any steps in the recipe apparently because updating roles isn't a 'step'.
+
+
+```{r}
+covid_workflow <- 
+  workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(bake_data)
+
+covid_workflow
+```
+
+
+
+Apparently `fit()` knows how to work with a model or workflow; if given a workflow it uses the contained model and applies the contained recipe to the given data, using the roles assigned by the recipe for 
+predictors and outcomes; if just given a model we'd need to specify which cols are the 
+predictors and outcome. Running this asked to install the 'ranger' package. 
+
+When fitting to a workflow, the "fit" result includes that workflow as well
+so if we predict using it the recipe is applied automatically.
+
+```{r}
+covid_fit <- covid_workflow %>%
+  fit(data = train_data)
+
+covid_fit
+```
+
+Alrighty, let's see how it did.
+Using type = "prob" to get probabilities of class outputs.
+
+```{r}
+predict(covid_fit, validate_data, type = "prob") %>%
+  head()
+```
+
+Let's bind it to the actual answers... along with some basic demographic info.
+
+```{r}
+predict(covid_fit, validate_data, type = "prob") %>%
+  bind_cols(validate_data %>% select(status, year_of_birth, gender_source_value)) %>%
+  head()
+```
+
+And we'll compute an ROC curve:
+
+```{r}
+predict(covid_fit, validate_data, type = "prob") %>%
+  bind_cols(validate_data %>% select(status, year_of_birth, gender_source_value)) %>%
+  roc_curve(truth = status, .pred_1) %>%
+  # produces a table with .threshold, specificity, sensitivity cols and class "roc_df" 
+  # for autoplot to dispatch on
+  autoplot()
+```
+
+
+Very bad. How about a PR curve?
+
+```{r}
+predict(covid_fit, validate_data, type = "prob") %>%
+  bind_cols(validate_data %>% select(status, year_of_birth, gender_source_value)) %>%
+  pr_curve(truth = status, .pred_1)%>%
+  # produces a table with .threshold, specificity, sensitivity cols and class "roc_df" 
+  # for autoplot to dispatch on
+  autoplot()
+```
+
+
+let's plot some predictions vs desired.
+
+```{r}
+predict(covid_fit, validate_data, type = "prob") %>%
+  bind_cols(validate_data %>% select(status, year_of_birth, gender_source_value)) %>%
+  mutate(age = year(now()) - year_of_birth) %>%
+  mutate(older_than_median = age > median(age)) %>%
+  ggplot() +
+    geom_histogram(aes(x = .pred_1, fill = status)) +
+    facet_grid(older_than_median ~ gender_source_value)
+```
+
+
+
+Let's see how the curves look on the training data:
+
+```{r}
+predict(covid_fit, train_data, type = "prob") %>%
+  bind_cols(train_data %>% select(status, year_of_birth, gender_source_value)) %>%
+  roc_curve(truth = status, .pred_1) %>%
+  # produces a table with .threshold, specificity, sensitivity cols and class "roc_df" 
+  # for autoplot to dispatch on
+  autoplot()
+```
+
+
+Holy overfit. PR?
+
+```{r}
+predict(covid_fit, train_data, type = "prob") %>%
+  bind_cols(train_data %>% select(status, year_of_birth, gender_source_value)) %>%
+  pr_curve(truth = status, .pred_1) %>%
+  # produces a table with .threshold, specificity, sensitivity cols and class "roc_df" 
+  # for autoplot to dispatch on
+  autoplot()
+```
+
+
+And the predictions vs desired:
+
+```{r}
+predict(covid_fit, train_data, type = "prob") %>%
+  bind_cols(train_data %>% select(status, year_of_birth, gender_source_value)) %>%
+  mutate(age = year(now()) - year_of_birth) %>%
+  mutate(older_than_median = age > median(age)) %>%
+  ggplot() +
+    geom_histogram(aes(x = .pred_1, fill = status)) +
+    facet_grid(older_than_median ~ gender_source_value)
+```
+
+## Cross-Validation
+
+Let's try `tidymodels` cross-validation features. 
+
+```{r}
+set.seed(345)
+
+folds <- vfold_cv(train_data, v = 5) # 5-fold cross-val
+folds
+```
+
+The nice thing about the workflow is we can re-use it, and `fit_resamples()` does the right thing with the folds.
+
+```{r}
+covid_fits <- covid_workflow %>%
+  fit_resamples(folds)
+
+covid_fits
+```
+
+Ok... 
+
+```{r}
+collect_metrics(covid_fits)
+```
+
+## Tuning
+
+The default min node size for ranger is 1 with unlimited max depth, which is probably why it's overfitting so hard. Let's try with some different minimum node size and max depth values. `min_n` is known to the `rand_forest()` wrapper, so it looks like I've got to set it there rather than `ranger`'s `min.node.size` supplied to `set_engine()` (seems unecessarily restrictive?), whereas `max.depth` is ranger-specific so the param apparently goes in the call to `set_engine()`. 
+
+```{r}
+
+new_model <- covid_workflow %>%
+  update_model(rand_forest(trees = 200, min_n = 30) %>% 
+               set_engine("ranger", max.depth = NULL, importance = "permutation") %>%
+               set_mode("classification")) %>%
+  update_recipe(recipe(status ~ ., data = train_data) %>% # predict status from all other column
+                update_role(person_id, location_id, new_role = "ID") %>%
+                # some of these cols still have NA, let's just drop them as predictors
+                update_role(address_1, 
+                            address_2, 
+                            city, 
+                            state, 
+                            zip, 
+                            county, 
+                            location_source_value, 
+                            new_role = "incomplete_data") %>%
+                update_role(status, new_role = "predictor") %>%
+                update_role(gender_source_value, new_role = "outcome")
+                #update_role(birth_datetime, year_of_birth, new_role = "ignored")
+                ) %>%
+  fit(data = train_data) 
+
+new_model %>% 
+  # predict
+  predict(train_data, type = "prob") %>%
+  # merge in desired values etc.
+  bind_cols(train_data %>% select(status, year_of_birth, gender_source_value)) %>%
+  # add a column indicating these are training data predictions
+  mutate(prediction_type = "train_data") %>%
+  # add in rows based on validation data, labeled as such
+  bind_rows(
+    new_model %>% 
+      predict(validate_data, type = "prob") %>%
+      bind_cols(validate_data %>% select(status, year_of_birth, gender_source_value)) %>%
+      mutate(prediction_type = "validate_data")
+  ) %>%
+  mutate(age = year(now()) - year_of_birth) %>%
+  mutate(older_than_median = age > median(age)) %>%
+  # show predictions vs desired outcomes separated by training and validation 
+  ggplot() +
+    geom_histogram(aes(x = .pred_M, fill = gender_source_value)) +
+    facet_grid(prediction_type ~ .)
+
+```
+
+Param importance...
+
+```{r}
+library(vip)
+
+new_model %>%
+  pull_workflow_fit() %>%
+  vip()
+```

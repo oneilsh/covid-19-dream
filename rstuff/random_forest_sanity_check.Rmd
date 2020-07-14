@@ -1,0 +1,82 @@
+---
+title: "Random Forest Sanity Check"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Loading data:
+
+```{r}
+library(ggplot2)
+```
+
+Let's analyze the ggplot `diamonds` dataset, adding a binary column to predict of whether the price per carat is larger than the median price per carat (should be very predictable from other variables).
+
+```{r}
+library(tidymodels)
+# define a split
+set.seed(256) # reset global random number generator seed
+train_test <- initial_split(diamonds, prop = 0.8)
+
+# execute the split
+train_val <- training(train_test)
+test_data <- testing(train_test)
+
+# define a split of the training data into actual training data, and validation data (to work on the model, we don't want to touch
+# the test data until we're done)
+train_val <- initial_split(train_val, prop = 0.8)
+train_data <- training(train_val)
+validate_data <- testing(train_val)
+
+dim(test_data)     # 20% of data
+dim(train_data)    # 80% of non-test data
+dim(validate_data) # 20% of non-test data
+```
+
+```{r}
+
+model <- workflow() %>%
+  # start by pretending we'll predict price
+  add_recipe(recipe(price ~ ., train_data) %>%
+             # hmm, adding this in the recipe means a new median will be computed for each
+             # dataset pushed through - this is probably ok, as it will only be used
+             # as an outcome var during training
+             step_mutate(expensive = factor(price/carat > median(price/carat)), role = "outcome") %>%
+             update_role(price, new_role = "not_fair") %>%
+             update_role(carat, y, x, z, new_role = "not_fair") %>%
+             prep() # runs the steps that generate new data (e.g. step_mutate)
+             ) %>%
+  add_model(rand_forest(trees = 100, min_n = NULL) %>% 
+            set_engine("ranger", max.depth = NULL, importance = "permutation") %>%
+            set_mode("classification")) %>% 
+  fit(train_data)
+  
+model %>%
+  predict(validate_data, type = "prob") %>%
+  bind_cols(validate_data) %>%
+  mutate(prediction_type = "validate_data") %>%
+  bind_rows(model %>% 
+            predict(train_data, type = "prob") %>%
+            bind_cols(train_data) %>%
+            mutate(prediction_type = "train_data")) %>%
+  # recompute expensiveness from training threshold
+  mutate(expensive = price/carat > median(train_data$price/train_data$carat)) %>%
+  ggplot() +
+    geom_histogram(aes(x = .pred_TRUE, fill = expensive), position = "dodge") +
+    facet_wrap(~ prediction_type)
+
+
+```
+
+
+
+```{r}
+library(vip)
+
+model %>%
+  pull_workflow_fit() %>%
+  vip()
+```

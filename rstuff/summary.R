@@ -3,7 +3,6 @@ library(tidyr)
 library(rstackdeque)
 
 load("../../subset_data.Rdat")
-data <- data_named_location
 
 str(data)
 

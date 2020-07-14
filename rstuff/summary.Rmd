@@ -1,0 +1,117 @@
+---
+title: "Summary"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load:
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(rstackdeque)
+library(skimr)
+
+load("../../subset_data.Rdat")
+```
+
+The `skimr` package makes nice table summaries, but the customization syntax is... ugh. This defines a skimming function where factor columns are summarized with more characters and top entries.
+
+```{r}
+myskimmer <- skim_with(factor = sfl(top_counts = ~top_counts(., max_char = 50, max_levels = 8)))
+```
+
+## condition_era.csv
+
+```{r}
+#skim_format(.levels = list(max_char = 36))
+myskimmer(data$condition_era.csv)
+```
+
+## condition_occurrence.csv
+
+```{r}
+#skim_format(.levels = list(max_char = 36))
+myskimmer(data$condition_occurrence.csv)
+```
+
+
+## device_exposure.csv
+
+```{r}
+#skim_format(.levels = list(max_char = 36))
+myskimmer(data$device_exposure.csv)
+```
+
+## drug_era.csv
+
+```{r}
+#skim_format(.levels = list(max_char = 36))
+myskimmer(data$drug_era.csv)
+```
+
+## drug_exposure.csv
+
+```{r}
+#skim_format(.levels = list(max_char = 36))
+myskimmer(data$drug_exposure.csv)
+```
+
+
+## goldstandard.csv
+
+```{r}
+#skim_format(.levels = list(max_char = 36))
+myskimmer(data$goldstandard.csv)
+```
+
+
+## measurement.csv
+
+```{r}
+#skim_format(.levels = list(max_char = 36))
+myskimmer(data$measurement.csv)
+```
+
+## observation_period.csv
+
+```{r}
+#skim_format(.levels = list(max_char = 36))
+myskimmer(data$observation_period.csv)
+```
+
+
+## observation.csv
+
+```{r}
+#skim_format(.levels = list(max_char = 36))
+myskimmer(data$observation.csv)
+```
+
+
+
+## person.csv
+
+```{r}
+#skim_format(.levels = list(max_char = 36))
+myskimmer(data$person.csv)
+```
+
+
+## procedure_occurrence.csv
+
+```{r}
+#skim_format(.levels = list(max_char = 36))
+myskimmer(data$procedure_occurrence.csv)
+```
+
+## visit_occurrence.csv
+
+```{r}
+#skim_format(.levels = list(max_char = 36))
+myskimmer(data$visit_occurrence.csv)
+```
+
